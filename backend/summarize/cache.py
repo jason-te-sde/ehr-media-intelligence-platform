@@ -46,6 +46,7 @@ def cache_key(patient_id: str, bundle_json: str) -> str:
 
 def get_cached(key: str, db_path: str | Path = DEFAULT_DB_PATH) -> ClinicalSummary | None:
     """Return the cached summary for ``key`` or ``None`` on miss."""
+    init_db(db_path)
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "SELECT summary_json FROM summaries WHERE cache_key = ?",
@@ -81,7 +82,9 @@ def get_for_patient(patient_id: str, db_path: str | Path = DEFAULT_DB_PATH) -> C
     """Convenience lookup by patient (returns the most recent if multiple).
 
     Used by Tasks 4-5 which know a patient_id but not a specific cache key.
+    Returns ``None`` if the table doesn't exist yet (no summaries generated).
     """
+    init_db(db_path)
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             """
