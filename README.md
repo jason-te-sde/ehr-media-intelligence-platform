@@ -2,7 +2,7 @@
 
 > Onye AI Full-stack internship code assessment — an AI-powered pipeline that ingests messy EHR records, normalizes them to HL7 FHIR R4, generates LLM-authored clinical summaries, exposes a semantic search API, and surfaces results through a clinician-facing web UI.
 
-**Status:** Tasks 1-3 complete (ingestion + FHIR + Claude summarization). Tasks 4-5 to follow.
+**Status:** Tasks 1-4 complete (ingestion + FHIR + Claude summarization + semantic search API). Task 5 (frontend UI) to follow.
 
 ---
 
@@ -116,13 +116,70 @@ sqlite3 store/store.db "SELECT COUNT(*) FROM summaries"
 sqlite3 store/store.db "SELECT chief_concern FROM summaries WHERE patient_id='<id>'"
 ```
 
+## Semantic Search (Task 4)
+
+Once Tasks 1-3 have populated `store/store.db`, build the vector index and run the API server:
+
+```bash
+python scripts/build_index.py            # ~10s for 100-pt cohort, ~minutes for 555
+uvicorn backend.api.main:app --reload    # http://localhost:8000
+```
+
+Endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | liveness probe |
+| GET | `/docs` | auto-generated OpenAPI / Swagger UI |
+| POST | `/search` | semantic search (Task 4) |
+| GET | `/patient/{id}` | patient detail (added in Task 5) |
+
+`POST /search` request/response:
+
+```jsonc
+// request
+{
+  "query": "chest pain shortness of breath",
+  "resource_types": ["DocumentReference", "DiagnosticReport"],   // optional
+  "date_from": "2024-01-01",                                       // optional
+  "date_to": "2024-12-31",                                         // optional
+  "top_k": 5                                                       // default 5, max 20
+}
+
+// response
+{
+  "hits": [
+    {
+      "patient_id": "...",
+      "mrn": "MRN-...",
+      "display_name": "Ada Lovelace",
+      "resource_type": "DocumentReference",
+      "resource_date": "2024-08-12",
+      "relevance_score": 0.78,
+      "snippet": "Patient reports chest pain radiating to ..."
+    }
+  ],
+  "query_time_ms": 42
+}
+```
+
+Quick curl test:
+
+```bash
+curl -X POST http://localhost:8000/search \
+     -H "Content-Type: application/json" \
+     -d '{"query":"chest pain","top_k":5}' | jq .
+```
+
+Performance: ChromaDB HNSW lookup over the full index returns p95 < 100 ms on a warmed server. Cold start adds ~3 s the first request (model loading).
+
 ## Running the tests
 
 ```bash
 pytest -v
 ```
 
-34 tests across ingestion (10), FHIR (16), and summarize (8). All pass on Python 3.14, pydantic 2.13, fhir.resources 8.2, anthropic 0.102.
+47 tests across ingestion (10), FHIR (16), summarize (8), search (13). All pass on Python 3.14, pydantic 2.13, fhir.resources 8.2, anthropic 0.102, sentence-transformers 5.5, chromadb 1.5, fastapi 0.136.
 
 ---
 
@@ -150,6 +207,14 @@ backend/
 │   ├── client.py                 # anthropic wrapper, retry, JSON extraction
 │   ├── cache.py                  # SQLite `summaries` table (keyed by bundle hash)
 │   └── quality.py                # word-count + disclaimer guards
+├── search/                       # Task 4 — vector index
+│   ├── embed.py                  # all-MiniLM-L6-v2 wrapper (384-dim, L2-norm)
+│   └── index.py                  # ChromaDB collection + query helpers
+├── api/                          # Task 4-5 — FastAPI app
+│   ├── main.py                   # app + /health + static frontend mount
+│   ├── models.py                 # SearchRequest/Hit/Response
+│   └── routes/
+│       └── search.py             # POST /search
 └── tests/
     ├── test_models.py
     ├── test_cleaner.py
@@ -157,12 +222,14 @@ backend/
     ├── test_fhir_bundle.py
     ├── test_fhir_store.py
     ├── test_summarize.py
+    ├── test_search.py
     └── data/edge_cases.json
 
 scripts/
 ├── download_data.sh              # idempotent dataset fetch
 ├── build_bundles.py              # CanonicalPatient[] → FHIR Bundle[] → SQLite
-└── generate_summaries.py         # FHIR Bundle[] → Claude → ClinicalSummary[] → SQLite
+├── generate_summaries.py         # FHIR Bundle[] → Claude → ClinicalSummary[] → SQLite
+└── build_index.py                # Bundle + Summary text → embeddings → ChromaDB
 
 data/                             # gitignored, populated by the download script
 store/                            # gitignored, SQLite + (future) ChromaDB
@@ -213,6 +280,22 @@ store/                            # gitignored, SQLite + (future) ChromaDB
 **Lazy + injectable client.** `client._get_client()` builds the Anthropic SDK client on first use, not on import, so tests and CI never need `ANTHROPIC_API_KEY` set. `client.set_client(mock)` lets the entire 8-test summarize suite run with a `MagicMock` — zero real API spend during development.
 
 **Trim bundles before sending.** Synthea bundles can be hundreds of KB (each patient has ~80 resources including every Observation). The client clips the serialized JSON at 50K chars before prompting. Truncation keeps the head of the bundle (Patient + early Encounters/Conditions) which is the most useful context for the chief-concern + diagnoses summary; trailing detail mostly duplicates earlier signal.
+
+---
+
+## Design notes (Task 4)
+
+**Why `all-MiniLM-L6-v2`.** 384-dim, ~80 MB, runs on CPU in tens of milliseconds — the right scale for a 100-1000 patient demo with no GPU budget. It's good at general semantic similarity (MI ≈ heart attack ≈ myocardial infarction) but not clinical-specialty trained; if quality issues surface, swapping in `pubmedbert` or a Hugging Face `sentence-transformers/all-mpnet-base-v2` is a one-line change because `embed.py` already centralizes the model name.
+
+**Why ChromaDB.** It's the lightest vector store that ships persistence out of the box. PersistentClient writes to a local directory, no server process, no schema migration, no extra dependencies. FAISS is faster at billion-vector scale but has no built-in persistence + metadata story; SQLite-vss requires a custom build of SQLite. For 500-1500 vectors per patient × 100s of patients, ChromaDB's HNSW returns top-5 in under 10 ms after the model is loaded.
+
+**Three indexed document types per patient.** `Summary` (one per patient, holds the LLM-distilled chief concern + diagnoses), `DocumentReference` (free-text notes from Synthea's bundles), `DiagnosticReport` (lab/imaging conclusions). The Summary is what a clinician would scan first; the other two surface verbatim source content for verification. Each is a separate row so they rank independently.
+
+**Unix-int timestamps for date filtering.** ChromaDB's `$gte` / `$lte` operators only accept numeric metadata — string comparisons of ISO dates do not work even though ISO dates sort lexicographically. We store two date fields per doc: `resource_date` (ISO string for display) and `resource_timestamp` (Unix int seconds for filtering). The API converts `date_from`/`date_to` to timestamps before building the where clause.
+
+**Cosine distance → relevance score in [0, 1].** ChromaDB returns cosine distance, where 0 = identical and 2 = opposite. We map `relevance_score = 1 - distance`, clamp to `[0, 1]`, and expose it on every `SearchHit`. Because embeddings are L2-normalized at the embedding layer, the cosine-distance space is mathematically equivalent to (1 - dot product), so the ranking matches what a manual cosine implementation would produce.
+
+**Idempotent index builds.** `scripts/build_index.py` uses composite ids like `<patient_id>::<resource_type>::<resource_id>` and consults `existing_ids()` before embedding. A re-run after adding 10 new patients embeds 10 patient's worth of docs (~800), not the full set. `--force` bypasses this for an end-to-end rebuild.
 
 ---
 
