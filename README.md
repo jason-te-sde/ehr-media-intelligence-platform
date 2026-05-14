@@ -2,7 +2,7 @@
 
 > Onye AI Full-stack internship code assessment — an AI-powered pipeline that ingests messy EHR records, normalizes them to HL7 FHIR R4, generates LLM-authored clinical summaries, exposes a semantic search API, and surfaces results through a clinician-facing web UI.
 
-**Status:** Task 1 (ingestion & cleaning) complete. Tasks 2-5 to follow.
+**Status:** Tasks 1-2 complete (ingestion + FHIR normalization). Tasks 3-5 to follow.
 
 ---
 
@@ -65,13 +65,37 @@ Verify the SQLite write:
 sqlite3 store/store.db "SELECT source_format, COUNT(*) FROM canonical_patients GROUP BY source_format"
 ```
 
+## Building FHIR R4 Bundles (Task 2)
+
+Once Task 1 has populated `canonical_patients`, build the FHIR Bundles:
+
+```bash
+pip install -e .                       # makes `backend.*` importable from scripts/
+python scripts/build_bundles.py
+```
+
+Each `CanonicalPatient` is mapped to a `Bundle` (`type = "collection"`) containing a `Patient` resource and — when the source has them — `DocumentReference` and `DiagnosticReport` resources. Inside the bundle, every `subject` reference uses `urn:uuid:{patient_id}` so it resolves against the entry `fullUrl`.
+
+Outputs:
+- **`store/store.db`** — adds the `bundles` table (one row per patient, `bundle_json` is the full FHIR JSON)
+- **`validation_report.json`** — per-patient pass/fail with `entries` count or error details
+
+Verify:
+
+```bash
+sqlite3 store/store.db "SELECT COUNT(*) FROM bundles"
+sqlite3 store/store.db "SELECT json_extract(bundle_json, '$.type') AS type, COUNT(*) FROM bundles GROUP BY type"
+```
+
+Verified on the full 655-patient cohort: 655/655 valid in ~32s, 56279 total FHIR resources persisted (avg 86/bundle for Synthea, 1 for MIMIC).
+
 ## Running the tests
 
 ```bash
 pytest -v
 ```
 
-Currently 10 tests: 3 model sanity checks + 6 cleaner edge cases + 1 bonus for unparseable DOB handling. All pass on Python 3.14 / pydantic 2.13.
+26 tests: 3 model sanity + 7 cleaner edge cases + 6 FHIR mapper + 6 FHIR bundle + 4 FHIR store. All pass on Python 3.14, pydantic 2.13, fhir.resources 8.2.
 
 ---
 
@@ -86,13 +110,24 @@ backend/
 │   │   ├── json_parser.py        # FHIR Bundle + NDJSON + JSON-array
 │   │   └── csv_parser.py         # CSV + .csv.gz
 │   └── pipeline.py               # parse → clean → dedup → audit → SQLite (CLI entry)
+├── fhir/                         # Task 2 — CanonicalPatient → FHIR Bundle
+│   ├── mappers/
+│   │   ├── patient.py
+│   │   ├── document_reference.py
+│   │   └── diagnostic_report.py
+│   ├── bundle.py                 # extract_documents/reports, build_bundle, validate_bundle
+│   └── store.py                  # SQLite `bundles` table
 └── tests/
     ├── test_models.py
     ├── test_cleaner.py
+    ├── test_fhir_mappers.py
+    ├── test_fhir_bundle.py
+    ├── test_fhir_store.py
     └── data/edge_cases.json
 
 scripts/
-└── download_data.sh              # idempotent dataset fetch
+├── download_data.sh              # idempotent dataset fetch
+└── build_bundles.py              # CanonicalPatient[] → FHIR Bundle[] → SQLite
 
 data/                             # gitignored, populated by the download script
 store/                            # gitignored, SQLite + (future) ChromaDB
@@ -113,6 +148,20 @@ store/                            # gitignored, SQLite + (future) ChromaDB
 **SQLite as a hand-off interface.** Task 2 (FHIR mapping) consumes Task 1's output. Returning a Python list from `run_pipeline()` only works if the caller is in the same process. Persisting `CanonicalPatient` to SQLite means batch scripts in Task 2/3/4 can be re-run independently without re-ingesting. The table key is `record_id` (uuid4); the patient body is the full Pydantic JSON, so the schema doesn't have to track every Pydantic field individually.
 
 **FHIR Bundle structure for downstream Task 2.** Each Synthea patient's full Bundle (containing not just the `Patient` resource but also `Encounter`, `Observation`, `Condition`, etc.) is attached to `raw_record["_fhir_bundle"]`. When Task 2 builds its own normalized FHIR bundles, it pulls clinical content from there instead of re-fetching.
+
+---
+
+## Design notes (Task 2)
+
+**Why `Bundle.type = "collection"`.** FHIR offers several bundle types (`document`, `message`, `transaction`, `batch`, `searchset`, `collection`). Our use case — a logical grouping of one patient's clinical artifacts for downstream search/summarization — matches `collection` exactly. We're not POSTing a transaction, not serving search results, and not exchanging messages.
+
+**`urn:uuid:` references throughout.** Bundle entries carry a `fullUrl` and resources inside reference each other. Two reference styles are common: external (`Patient/{id}` resolving against a base URL) and internal (`urn:uuid:{id}` resolving against another `fullUrl` in the same bundle). We use the internal form so each bundle is self-contained — Task 3 and Task 4 can hand a bundle to any FHIR-aware tool without needing to specify a base URL.
+
+**Lift Synthea's own DocumentReferences and DiagnosticReports, don't synthesize.** Synthea bundles already carry `DocumentReference` resources (free-text history-and-physical notes encoded as base64 attachments) and `DiagnosticReport` resources (lab summaries in `presentedForm`). `extract_documents` / `extract_reports` pull these out, decode the base64, and re-emit fresh resources via our mappers so all references retarget to our canonical `Patient.id`. This keeps clinical content authentic without copying any Synthea-specific identifiers forward.
+
+**Validation as a roundtrip, not a static check.** `fhir.resources` enforces field types at construction time, so a bundle that *can* be built is already valid against the FHIR R4 schema. `validate_bundle` adds a JSON serialize → deserialize round-trip which catches the rare cases where the in-memory model is fine but cannot be losslessly persisted. The result is captured per-patient in `validation_report.json` so any failures surface in the build run instead of silently being dropped.
+
+**Bundles as the source of truth for downstream tasks.** Once a bundle is in the `bundles` table, the upstream `canonical_patients` row is no longer needed for AI summarization or semantic search — the bundle contains everything a clinician would care about. This is why Task 3 and Task 4 will read from `bundles` directly rather than re-running ingestion or mapping.
 
 ---
 
