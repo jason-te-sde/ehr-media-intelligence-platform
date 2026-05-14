@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EHR Media Intelligence</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Skeleton loader animation */
+    @keyframes pulse-bg { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+    .skeleton { animation: pulse-bg 1.5s ease-in-out infinite; }
+    /* Focus ring stays visible on dark backdrops */
+    :focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
+
+<header class="bg-white border-b shadow-sm sticky top-0 z-10">
+  <div class="max-w-5xl mx-auto px-4 py-3 space-y-3">
+    <div class="flex items-baseline justify-between gap-3 flex-wrap">
+      <h1 class="text-xl font-semibold tracking-tight">EHR Media Intelligence</h1>
+      <p class="text-xs text-slate-500">Semantic search · Clinician triage view</p>
+    </div>
+
+    <!-- Filter row -->
+    <div id="filters" role="region" aria-label="Search filters"
+         class="flex flex-wrap items-center gap-2 text-sm">
+      <span class="text-slate-500 mr-1">Type:</span>
+      <button data-rtype="Summary" aria-pressed="false"
+              class="rtype min-h-9 px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-100 transition">Summary</button>
+      <button data-rtype="DocumentReference" aria-pressed="false"
+              class="rtype min-h-9 px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-100 transition">Note</button>
+      <button data-rtype="DiagnosticReport" aria-pressed="false"
+              class="rtype min-h-9 px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-100 transition">Report</button>
+
+      <span class="text-slate-500 ml-3 mr-1">Date:</span>
+      <label class="sr-only" for="date-from">Date from</label>
+      <input id="date-from" type="date" class="min-h-9 px-2 py-1 border border-slate-300 rounded text-sm">
+      <span class="text-slate-400">→</span>
+      <label class="sr-only" for="date-to">Date to</label>
+      <input id="date-to" type="date" class="min-h-9 px-2 py-1 border border-slate-300 rounded text-sm">
+
+      <button id="clear-filters" type="button"
+              class="min-h-9 px-3 py-1 text-slate-500 hover:text-slate-800 hover:underline ml-auto">Clear filters</button>
+    </div>
+
+    <!-- Search input -->
+    <div>
+      <label class="sr-only" for="search">Search patient records</label>
+      <input id="search" type="search" role="searchbox" aria-label="Search patient records"
+             placeholder='Try "chest pain", "type 2 diabetes", "abnormal lab"...'
+             autocomplete="off"
+             class="w-full px-4 py-2 min-h-11 border border-slate-300 rounded-md text-base focus:border-blue-500">
+    </div>
+  </div>
+</header>
+
+<main class="max-w-5xl mx-auto px-4 py-6 w-full flex-1">
+  <p id="status" aria-live="polite" class="sr-only"></p>
+
+  <!-- Loading skeleton -->
+  <div id="loading" hidden class="space-y-3" aria-hidden="true">
+    <div class="skeleton bg-white border rounded-lg p-4 h-24"></div>
+    <div class="skeleton bg-white border rounded-lg p-4 h-24"></div>
+    <div class="skeleton bg-white border rounded-lg p-4 h-24"></div>
+  </div>
+
+  <!-- Result list -->
+  <ul id="results" role="list" class="space-y-3"></ul>
+
+  <!-- Empty / hint states -->
+  <div id="hint" class="text-center text-slate-500 py-12">
+    <p class="text-sm">Start typing to search across all patient records.</p>
+  </div>
+  <div id="empty" hidden class="text-center text-slate-500 py-12">
+    <p class="font-medium text-slate-700">No matches</p>
+    <p class="text-sm mt-1">Try a different query or remove a filter.</p>
+  </div>
+  <div id="error" hidden role="alert" class="text-center text-red-600 py-12">
+    <p class="font-medium">Search failed</p>
+    <p id="error-msg" class="text-sm mt-1"></p>
+  </div>
+</main>
+
+<!-- Patient detail modal -->
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" hidden
+     class="fixed inset-0 bg-black/50 z-20 flex items-start sm:items-center justify-center p-4 overflow-y-auto">
+  <div class="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-xl"
+       data-modal-content>
+    <div class="px-6 py-4 border-b flex items-start justify-between gap-3 sticky top-0 bg-white">
+      <div>
+        <h2 id="modal-title" class="text-lg font-semibold">Patient detail</h2>
+        <p id="modal-subtitle" class="text-sm text-slate-500"></p>
+      </div>
+      <button id="modal-close" type="button" aria-label="Close patient detail"
+              class="min-h-9 min-w-9 -m-2 p-2 text-slate-400 hover:text-slate-700">✕</button>
+    </div>
+    <div id="modal-body" class="px-6 py-4 space-y-4"></div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
