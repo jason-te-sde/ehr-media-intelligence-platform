@@ -1,0 +1,11 @@
+[
+  { "mrn": "12345",            "FIRST": "Ada",    "LAST": "Lovelace", "GENDER": "M",       "BIRTHDATE": "01/15/1990" },
+  { "mrn": "MRN-00012345",     "FIRST": "Ada",    "LAST": "Lovelace", "GENDER": "1",       "BIRTHDATE": "1990-01-15" },
+  { "mrn": "  012345  ",       "FIRST": "Ada",    "LAST": "Lovelace", "GENDER": "MALE",    "BIRTHDATE": "15-Jan-1990" },
+
+  { "mrn": "999",              "FIRST": "Grace",  "LAST": "Hopper",   "GENDER": "F",       "BIRTHDATE": "" },
+  { "mrn": "1001",             "FIRST": "Mary",   "LAST": "",         "GENDER": "female",  "BIRTHDATE": "1815-12-10" },
+  { "mrn": "1002",             "FIRST": "Linus",  "LAST": "Torvalds", "GENDER": "??",      "BIRTHDATE": "1969-12-28" },
+  { "mrn": "1003",             "FIRST": "Margaret","LAST":"Hamilton", "GENDER": "2",       "BIRTHDATE": "1936-08-17" },
+  { "mrn": "1004",             "FIRST": "Alan",   "LAST": "Turing",   "GENDER": "male",    "BIRTHDATE": "not a date" }
+]
