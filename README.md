@@ -2,7 +2,7 @@
 
 > Onye AI Full-stack internship code assessment — an AI-powered pipeline that ingests messy EHR records, normalizes them to HL7 FHIR R4, generates LLM-authored clinical summaries, exposes a semantic search API, and surfaces results through a clinician-facing web UI.
 
-**Status:** Tasks 1-2 complete (ingestion + FHIR normalization). Tasks 3-5 to follow.
+**Status:** Tasks 1-3 complete (ingestion + FHIR + Claude summarization). Tasks 4-5 to follow.
 
 ---
 
@@ -89,13 +89,40 @@ sqlite3 store/store.db "SELECT json_extract(bundle_json, '$.type') AS type, COUN
 
 Verified on the full 655-patient cohort: 655/655 valid in ~32s, 56279 total FHIR resources persisted (avg 86/bundle for Synthea, 1 for MIMIC).
 
+## Generating AI Clinical Summaries (Task 3)
+
+Set up the Anthropic key and run the batch script:
+
+```bash
+cp .env.example .env             # then fill in ANTHROPIC_API_KEY=sk-ant-...
+python scripts/generate_summaries.py [--limit N]
+```
+
+For each FHIR Bundle in `store/store.db`, the script:
+
+1. Computes `cache_key = sha256(patient_id + bundle_json)`
+2. Hits cache → done (zero API spend on re-runs)
+3. Calls **Claude Haiku 4.5** with a strict system prompt (JSON-only, ≤200 words, never invent facts, always include AI disclaimer)
+4. Parses + validates the JSON into a `ClinicalSummary` model
+5. Word-count guard: if over 200, retry once with the same prompt
+6. Saves to the `summaries` table
+
+A `ClinicalSummary` has: `chief_concern`, `key_diagnoses[]`, `recent_media[]`, `anomalies[]`, `disclaimer`, `word_count`, `model`, `generated_at`.
+
+Inspect the cache:
+
+```bash
+sqlite3 store/store.db "SELECT COUNT(*) FROM summaries"
+sqlite3 store/store.db "SELECT chief_concern FROM summaries WHERE patient_id='<id>'"
+```
+
 ## Running the tests
 
 ```bash
 pytest -v
 ```
 
-26 tests: 3 model sanity + 7 cleaner edge cases + 6 FHIR mapper + 6 FHIR bundle + 4 FHIR store. All pass on Python 3.14, pydantic 2.13, fhir.resources 8.2.
+34 tests across ingestion (10), FHIR (16), and summarize (8). All pass on Python 3.14, pydantic 2.13, fhir.resources 8.2, anthropic 0.102.
 
 ---
 
@@ -117,17 +144,25 @@ backend/
 │   │   └── diagnostic_report.py
 │   ├── bundle.py                 # extract_documents/reports, build_bundle, validate_bundle
 │   └── store.py                  # SQLite `bundles` table
+├── summarize/                    # Task 3 — Bundle → ClinicalSummary
+│   ├── models.py                 # ClinicalSummary (Pydantic v2)
+│   ├── prompts.py                # SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+│   ├── client.py                 # anthropic wrapper, retry, JSON extraction
+│   ├── cache.py                  # SQLite `summaries` table (keyed by bundle hash)
+│   └── quality.py                # word-count + disclaimer guards
 └── tests/
     ├── test_models.py
     ├── test_cleaner.py
     ├── test_fhir_mappers.py
     ├── test_fhir_bundle.py
     ├── test_fhir_store.py
+    ├── test_summarize.py
     └── data/edge_cases.json
 
 scripts/
 ├── download_data.sh              # idempotent dataset fetch
-└── build_bundles.py              # CanonicalPatient[] → FHIR Bundle[] → SQLite
+├── build_bundles.py              # CanonicalPatient[] → FHIR Bundle[] → SQLite
+└── generate_summaries.py         # FHIR Bundle[] → Claude → ClinicalSummary[] → SQLite
 
 data/                             # gitignored, populated by the download script
 store/                            # gitignored, SQLite + (future) ChromaDB
@@ -162,6 +197,22 @@ store/                            # gitignored, SQLite + (future) ChromaDB
 **Validation as a roundtrip, not a static check.** `fhir.resources` enforces field types at construction time, so a bundle that *can* be built is already valid against the FHIR R4 schema. `validate_bundle` adds a JSON serialize → deserialize round-trip which catches the rare cases where the in-memory model is fine but cannot be losslessly persisted. The result is captured per-patient in `validation_report.json` so any failures surface in the build run instead of silently being dropped.
 
 **Bundles as the source of truth for downstream tasks.** Once a bundle is in the `bundles` table, the upstream `canonical_patients` row is no longer needed for AI summarization or semantic search — the bundle contains everything a clinician would care about. This is why Task 3 and Task 4 will read from `bundles` directly rather than re-running ingestion or mapping.
+
+---
+
+## Design notes (Task 3)
+
+**Why Claude Haiku 4.5.** Structured summarization with a strict schema is a constrained task — the model mostly needs to follow instructions and extract facts. Haiku is the cheapest tier with strong instruction-following, so the full 655-patient batch stays under a dollar. We can escalate to Sonnet 4.6 later by passing `--model claude-sonnet-4-6` to `generate_summaries.py`; nothing else changes.
+
+**Prompt-as-contract.** The system prompt embeds the entire output JSON schema and the constraints (≤200 words, never invent facts, mandatory disclaimer). The user prompt embeds the bundle JSON and the same schema for self-check. Combined with Pydantic's `model_validate` on parse, that's three independent layers of structure enforcement: prompt instructions, prompt schema, runtime validation.
+
+**Cache key = patient + bundle hash.** `sha256(patient_id + bundle_json)` means any change in the upstream bundle invalidates exactly the affected entries and nothing else. Re-running the pipeline is idempotent and cheap; running the entire 655-patient cohort costs ~$0 on re-run. The key also doesn't bake in the model name, so switching to Sonnet later means a single full re-summarization — which is what we'd want, since results would change.
+
+**Quality validation methodology.** Three programmatic guards run on every summary: (1) Pydantic schema validation ensures every required field is present and well-typed; (2) `validate_word_count` rejects summaries over 200 words across all free-text fields combined; (3) `has_disclaimer` rejects empty disclaimers. A manual spot-check methodology lives in the writeup: pick 5 random `(bundle, summary)` pairs, diff the summary against the bundle's `Condition` and `Observation` resources, look for hallucinated diagnoses or medications. The negative test (a bundle stripped of clinical content) confirms the model says "no clinical history on record" rather than inventing one.
+
+**Lazy + injectable client.** `client._get_client()` builds the Anthropic SDK client on first use, not on import, so tests and CI never need `ANTHROPIC_API_KEY` set. `client.set_client(mock)` lets the entire 8-test summarize suite run with a `MagicMock` — zero real API spend during development.
+
+**Trim bundles before sending.** Synthea bundles can be hundreds of KB (each patient has ~80 resources including every Observation). The client clips the serialized JSON at 50K chars before prompting. Truncation keeps the head of the bundle (Patient + early Encounters/Conditions) which is the most useful context for the chief-concern + diagnoses summary; trailing detail mostly duplicates earlier signal.
 
 ---
 
