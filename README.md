@@ -23,6 +23,24 @@ pip install -r requirements.txt
 pytest -v
 ```
 
+## Downloading the datasets
+
+The pipeline expects three public EHR datasets under `data/` (gitignored). Fetch them with:
+
+```bash
+bash scripts/download_data.sh
+```
+
+The script is idempotent — re-runs skip datasets that are already on disk. Datasets fetched:
+
+| Dataset | Size | Role | Source |
+|---|---|---|---|
+| Synthea FHIR R4 sample | ~90 MB | Primary JSON input (FHIR Bundles) | [synthea-sample-data](https://github.com/synthetichealth/synthea-sample-data) |
+| Synthea CSV sample | ~56 MB | Primary CSV input (multi-table) | same |
+| MIMIC-IV demo | ~16 MB | Real-world deidentified CSV | [PhysioNet](https://physionet.org/content/mimic-iv-demo/2.2/) |
+
+Synthea data is fully synthetic (no PHI). MIMIC-IV demo is deidentified under HIPAA Safe Harbor and freely redistributable.
+
 ## Running the pipeline
 
 Detailed run instructions will be added per task as features land.
