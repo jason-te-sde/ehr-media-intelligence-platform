@@ -19,11 +19,11 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-# /search router lands in issue #47
-# /patient router lands in issue #29 (Task 5)
+from backend.api.routes.patient import router as patient_router
 from backend.api.routes.search import router as search_router
 
 app.include_router(search_router)
+app.include_router(patient_router)
 
 
 # Static frontend mount. The frontend/ directory is populated in Task 5;
