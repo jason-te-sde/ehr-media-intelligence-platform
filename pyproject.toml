@@ -1,0 +1,19 @@
+[project]
+name = "ehr-media-intelligence-platform"
+version = "0.1.0"
+description = "EHR Media Intelligence Platform — FHIR R4 ingestion, Claude summarization, semantic search"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "Te Rigong", email = "te.r@northeastern.edu" }]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+addopts = "-ra"
