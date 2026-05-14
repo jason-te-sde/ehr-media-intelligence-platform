@@ -2,7 +2,7 @@
 
 > Onye AI Full-stack internship code assessment — an AI-powered pipeline that ingests messy EHR records, normalizes them to HL7 FHIR R4, generates LLM-authored clinical summaries, exposes a semantic search API, and surfaces results through a clinician-facing web UI.
 
-**Status:** Tasks 1-4 complete (ingestion + FHIR + Claude summarization + semantic search API). Task 5 (frontend UI) to follow.
+**Status:** All 5 tasks complete — ingestion · FHIR R4 · Claude summarization · semantic search API · clinician UI.
 
 ---
 
@@ -173,6 +173,21 @@ curl -X POST http://localhost:8000/search \
 
 Performance: ChromaDB HNSW lookup over the full index returns p95 < 100 ms on a warmed server. Cold start adds ~3 s the first request (model loading).
 
+## Frontend (Task 5)
+
+After `uvicorn` is up (see Task 4), open `http://localhost:8000/` in a browser. The page is served from `frontend/index.html` via FastAPI's `StaticFiles` mount, so there is no separate dev server.
+
+Features:
+
+- Search bar with 300 ms debounce → `POST /search`
+- Filter row: resource-type chips (multi-select with `aria-pressed`) + date range inputs
+- Result cards with patient name/MRN, resource date, type badge, summary snippet, and a relevance score meter
+- Patient detail modal (opens on card click or Enter/Space): full AI summary + linked FHIR resources list
+- Loading skeleton, empty state, error toast
+- Accessibility: ARIA labels, semantic landmarks, `aria-live` status announcements, focus trap inside modal, `Esc` to close
+
+Stack: vanilla JS (no build) + Tailwind via CDN. The entire frontend is two files (`index.html`, `app.js`) totaling ~17 KB.
+
 ## Running the tests
 
 ```bash
@@ -214,7 +229,8 @@ backend/
 │   ├── main.py                   # app + /health + static frontend mount
 │   ├── models.py                 # SearchRequest/Hit/Response
 │   └── routes/
-│       └── search.py             # POST /search
+│       ├── search.py             # POST /search (Task 4)
+│       └── patient.py            # GET /patient/{id} (Task 5)
 └── tests/
     ├── test_models.py
     ├── test_cleaner.py
@@ -231,8 +247,12 @@ scripts/
 ├── generate_summaries.py         # FHIR Bundle[] → Claude → ClinicalSummary[] → SQLite
 └── build_index.py                # Bundle + Summary text → embeddings → ChromaDB
 
+frontend/
+├── index.html                    # Tailwind CDN + filter row + search + results + modal
+└── app.js                        # state, debounced search, filters, modal w/ focus trap
+
 data/                             # gitignored, populated by the download script
-store/                            # gitignored, SQLite + (future) ChromaDB
+store/                            # gitignored, SQLite (store.db) + ChromaDB (chroma/)
 ```
 
 ---
@@ -296,6 +316,22 @@ store/                            # gitignored, SQLite + (future) ChromaDB
 **Cosine distance → relevance score in [0, 1].** ChromaDB returns cosine distance, where 0 = identical and 2 = opposite. We map `relevance_score = 1 - distance`, clamp to `[0, 1]`, and expose it on every `SearchHit`. Because embeddings are L2-normalized at the embedding layer, the cosine-distance space is mathematically equivalent to (1 - dot product), so the ranking matches what a manual cosine implementation would produce.
 
 **Idempotent index builds.** `scripts/build_index.py` uses composite ids like `<patient_id>::<resource_type>::<resource_id>` and consults `existing_ids()` before embedding. A re-run after adding 10 new patients embeds 10 patient's worth of docs (~800), not the full set. `--force` bypasses this for an end-to-end rebuild.
+
+---
+
+## Design notes (Task 5)
+
+**Vanilla JS + Tailwind CDN, not React.** The UI is one search input, one filter row, a list of cards, and a modal. The total state graph fits on the back of a napkin — there's no component tree deep enough to need React's reconciliation, no client-side routing, no global store. Adding a build step (Vite, Tailwind CLI, npm) would have cost ~20× the lines for zero functional gain. Tailwind via `<script src="https://cdn.tailwindcss.com">` is officially "not for production" but for a buildless demo it's the right tradeoff; the README documents how to swap to a vendored `tailwind.min.css` if the CDN is unreachable.
+
+**Same-origin static mount instead of CORS.** FastAPI mounts `frontend/` at `/` after the API routes are registered, so the frontend and backend share an origin. No `CORSMiddleware`, no cookies, no preflight requests, no proxy config — `fetch('/search')` and `fetch('/patient/{id}')` Just Work.
+
+**Race-condition guard on the search input.** Every keystroke increments `state.requestId` before issuing a `fetch`. When the promise resolves, the response is dropped if its captured id doesn't match the current one. Without this, an older slow request can overwrite the rendering of a newer fast request — visible during cold start when the first query takes ~3 s while later queries take ~100 ms.
+
+**Focus trap implemented by hand.** ~20 lines: enumerate focusable elements inside the modal, intercept `Tab` / `Shift+Tab`, wrap focus between the first and last. We restore focus to the originating card on close via `lastFocused`. This is cheap and matches what production a11y libraries do; pulling in `focus-trap` or `@radix-ui/dialog` would add a build step and ~30 KB.
+
+**Accessibility methodology.** Verified manually: tab through the search box → filter chips → cards → modal close button without escaping focus order. `Esc` closes the modal and returns focus to the card. Screen-reader announcements via the `aria-live="polite"` status element keep keyboard-only users informed of "Searching…", result counts, "Search failed", and "Showing detail for X". Visible focus rings via `:focus-visible`. A Lighthouse run on a result-laden page is the recommended automated check, with a target of ≥ 90.
+
+**Score visualization.** A horizontal bar (`role="meter"`, `aria-valuemin=0`, `aria-valuemax=1`, `aria-valuenow=<score>`) plus the numeric value. No chart library. The bar fills a Tailwind `bg-blue-500` to `score * 100%` width — scannable at a glance and announces correctly to screen readers.
 
 ---
 
