@@ -1,340 +1,397 @@
+<div align="center">
+
 # EHR Media Intelligence Platform
 
-> Onye AI Full-stack internship code assessment — an AI-powered pipeline that ingests messy EHR records, normalizes them to HL7 FHIR R4, generates LLM-authored clinical summaries, exposes a semantic search API, and surfaces results through a clinician-facing web UI.
+**AI-powered semantic search & summarization across messy clinical records.**
 
-**Status:** All 5 tasks complete — ingestion · FHIR R4 · Claude summarization · semantic search API · clinician UI.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.136-009688.svg?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![FHIR R4](https://img.shields.io/badge/HL7-FHIR%20R4-red.svg)](https://www.hl7.org/fhir/R4/)
+[![ChromaDB](https://img.shields.io/badge/ChromaDB-1.5-7B61FF.svg)](https://www.trychroma.com/)
+[![Ollama](https://img.shields.io/badge/Ollama-llama3.2-000000.svg)](https://ollama.com/)
+[![Tests](https://img.shields.io/badge/tests-47%2F47%20passing-brightgreen.svg)](#testing)
+
+A reference pipeline that turns heterogeneous EHR exports (JSON / CSV / FHIR Bundles) into
+HL7 FHIR R4, generates LLM-authored clinical summaries with offline & API providers, and
+serves a clinician triage UI over a 2-second semantic search backend.
+
+[Quick start](#-quick-start) ·
+[Demo](#-demo) ·
+[Architecture](#-architecture) ·
+[API](#-api-reference) ·
+[Deploy](#-deployment)
+
+</div>
 
 ---
 
-## Setup
+## ✨ Features
 
-Requires Python 3.11+.
+- **Multi-format ingestion** — JSON / NDJSON / FHIR Bundle / CSV / gzipped CSV; auto-detects shape.
+- **Robust cleaning** — missing fields, inconsistent date formats, duplicates, conflicting MRNs all logged per-record.
+- **HL7 FHIR R4 normalization** — `Patient`, `Encounter`, `DocumentReference`, `DiagnosticReport` with internally-resolving `urn:uuid:` references.
+- **Pluggable LLM provider** — Ollama (local, default), Anthropic Claude, or extractive offline fallback.
+- **Semantic search** — sentence-transformer embeddings + ChromaDB HNSW; p95 < 100 ms on 50k+ documents.
+- **Clinician UI** — search bar, ranked patient cards with AI summary snippets, full-detail modal, FHIR-resource filter, date-range picker. ARIA-compliant, keyboard-navigable.
+- **Confidence + disclaimer** on every AI summary; SQLite cache keyed by `sha256(patient_id + bundle_json)` so any bundle change invalidates it.
+- **Honest verification** — `scripts/verify.py` exercises 30 PDF requirements against the live stack; `scripts/e2e_human.py` drives the UI through a real headless WebKit with human-trajectory pacing.
+
+---
+
+## 🏗 Architecture
+
+```mermaid
+flowchart TD
+    A1[Synthea FHIR JSON]:::src --> T1
+    A2[MIMIC-IV CSV]:::src --> T1
+    A3[NDJSON / array exports]:::src --> T1
+
+    T1["**Task 1 — Ingestion**<br/>parse → clean → audit log<br/>CanonicalPatient (Pydantic v2)"]:::task --> DB[(SQLite<br/>canonical_patients)]:::store
+
+    DB --> T2["**Task 2 — FHIR R4**<br/>Patient + Encounter +<br/>DocumentReference +<br/>DiagnosticReport<br/>urn:uuid: internal refs"]:::task
+
+    T2 --> DB2[(SQLite<br/>bundles)]:::store
+
+    DB2 --> T3["**Task 3 — LLM Summary**<br/>chief_concern · diagnoses<br/>· recent_media · anomalies<br/>· confidence · disclaimer<br/>≤ 200 words"]:::task
+
+    subgraph providers["Provider abstraction"]
+        P1[Ollama llama3.2:3b<br/>local default]:::prov
+        P2[Anthropic Claude<br/>claude-haiku-4-5]:::prov
+        P3[Extractive fallback<br/>deterministic, no LLM]:::prov
+    end
+    T3 <--> providers
+
+    T3 --> DB3[(SQLite<br/>summaries<br/>cache by sha256)]:::store
+
+    DB2 --> T4
+    DB3 --> T4
+
+    T4["**Task 4 — Semantic search**<br/>all-MiniLM-L6-v2 384-d<br/>ChromaDB cosine HNSW<br/>patient-level dedupe<br/>p95 < 100 ms"]:::task
+
+    T4 --> API[/POST /search<br/>GET /patient/:id<br/>POST /summarize<br/>GET /providers/]:::api
+
+    API --> T5["**Task 5 — Clinician UI**<br/>Tailwind + Vanilla JS<br/>search · cards · modal<br/>resource-type dropdown<br/>date range · ARIA"]:::task
+
+    classDef src     fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e;
+    classDef task    fill:#f0fdf4,stroke:#15803d,color:#14532d;
+    classDef store   fill:#fef9c3,stroke:#a16207,color:#713f12;
+    classDef prov    fill:#fae8ff,stroke:#a21caf,color:#581c87;
+    classDef api     fill:#fee2e2,stroke:#b91c1c,color:#7f1d1d;
+```
+
+### Request lifecycle — search
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as Browser
+    participant API as FastAPI /search
+    participant Idx as ChromaDB
+    participant Cache as SQLite summaries
+    UI->>API: POST {query, top_k=5, filters}
+    API->>Idx: query_embeddings + where
+    Idx-->>API: top_k×5 raw hits
+    API->>API: dedupe by patient_id, keep best
+    API->>Cache: SELECT summary WHERE patient_id IN (...)
+    Cache-->>API: cached summaries (if any)
+    API-->>UI: 5 hits with summary_snippet + relevance_score
+    UI->>UI: render cards (300 ms debounce + race guard)
+```
+
+### Request lifecycle — on-demand AI summary
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as Modal
+    participant API as POST /summarize
+    participant Cache as SQLite summaries
+    participant LLM as Ollama / Anthropic
+    UI->>API: POST patient/{id}/summarize
+    API->>Cache: get_for_patient(pid)
+    alt cache hit
+        Cache-->>API: cached summary
+        API-->>UI: 200 cached=true (≈ 20 ms)
+    else cache miss
+        API->>LLM: bundle_to_text + system prompt
+        LLM-->>API: JSON (chief_concern, ...)
+        API->>API: validate schema · enforce ≤200 words · fill empty arrays from deterministic extraction
+        API->>Cache: save(sha256(pid+bundle), summary)
+        API-->>UI: 200 cached=false (≈ 15-25 s on CPU)
+    end
+```
+
+---
+
+## 🚀 Quick Start
+
+### Option 1 — Docker (recommended for first run)
 
 ```bash
 git clone https://github.com/jason-te-sde/ehr-media-intelligence-platform.git
 cd ehr-media-intelligence-platform
 
-python3 -m venv .venv          # or python3.11 / python3.14
-source .venv/bin/activate
-pip install -r requirements.txt
+# Build with the baked 25-patient demo dataset.
+docker build -t ehr-media .
+docker run -p 7860:7860 ehr-media
+
+open http://localhost:7860
 ```
 
-## Downloading the datasets
-
-The pipeline expects three public EHR datasets under `data/` (gitignored). Fetch them with:
+That's it. Opens a fully functional UI with 25 sample patients and pre-generated extractive summaries. To enable Claude-authored AI summaries:
 
 ```bash
-bash scripts/download_data.sh
+docker run -p 7860:7860 \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e LLM_PROVIDER=anthropic \
+  ehr-media
 ```
 
-The script is idempotent — re-runs skip datasets already on disk. Datasets fetched:
+### Option 2 — Local Python
 
-| Dataset | Size | Role | Source |
-|---|---|---|---|
-| Synthea FHIR R4 sample | ~90 MB | Primary JSON input (FHIR Bundles) | [synthea-sample-data](https://github.com/synthetichealth/synthea-sample-data) |
-| Synthea CSV sample | ~56 MB | Primary CSV input (multi-table) | same |
-| MIMIC-IV demo | ~16 MB | Real-world deidentified CSV | [PhysioNet](https://physionet.org/content/mimic-iv-demo/2.2/) |
+```bash
+git clone https://github.com/jason-te-sde/ehr-media-intelligence-platform.git
+cd ehr-media-intelligence-platform
 
-Synthea data is fully synthetic (no PHI). MIMIC-IV demo is deidentified under HIPAA Safe Harbor and freely redistributable.
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
+
+# Download datasets (~160 MB Synthea + MIMIC-IV demo)
+bash scripts/download_data.sh
+
+# Build the canonical store: ingest → FHIR bundles → ChromaDB index
+python scripts/build_bundles.py
+python scripts/build_index.py
+
+# Pick an LLM:
+#   default = Ollama local (zero cost; pull a model first)
+#     brew services start ollama && ollama pull llama3.2:3b
+#   or: export ANTHROPIC_API_KEY=sk-ant-... && export LLM_PROVIDER=anthropic
+#   or: skip LLM — extractive fallback works without any key
+
+uvicorn backend.api.main:app --port 8000
+```
+
+Open <http://127.0.0.1:8000>.
+
+### Option 3 — Hugging Face Spaces (free public demo)
+
+[See § Deployment](#-deployment) for the 5-minute walkthrough.
 
 ---
 
-## Running the ingestion pipeline (Task 1)
+## ⚙️ Configuration
 
-Run on any of the supported inputs. The CLI auto-detects format by extension/directory.
+All config is via environment variables. Sensible defaults; only `ANTHROPIC_API_KEY` is required if you want Claude summaries.
 
-```bash
-# Synthea FHIR Bundles directory (555 patients)
-python -m backend.ingestion.pipeline data/synthea/fhir/fhir
-
-# Synthea CSV
-python -m backend.ingestion.pipeline data/synthea/csv/csv/patients.csv
-
-# MIMIC-IV demo (gzipped CSV)
-python -m backend.ingestion.pipeline data/mimic_iv_demo/mimic-iv-clinical-database-demo-2.2/hosp/patients.csv.gz
-```
-
-Each run produces:
-
-- **`store/store.db`** — SQLite database with the `canonical_patients` table (upserted by `record_id`)
-- **`audit_report.json`** — per-record audit entries plus aggregate stats keyed by `by_reason`
-
-Verify the SQLite write:
-
-```bash
-sqlite3 store/store.db "SELECT source_format, COUNT(*) FROM canonical_patients GROUP BY source_format"
-```
-
-## Building FHIR R4 Bundles (Task 2)
-
-Once Task 1 has populated `canonical_patients`, build the FHIR Bundles:
-
-```bash
-pip install -e .                       # makes `backend.*` importable from scripts/
-python scripts/build_bundles.py
-```
-
-Each `CanonicalPatient` is mapped to a `Bundle` (`type = "collection"`) containing a `Patient` resource and — when the source has them — `DocumentReference` and `DiagnosticReport` resources. Inside the bundle, every `subject` reference uses `urn:uuid:{patient_id}` so it resolves against the entry `fullUrl`.
-
-Outputs:
-- **`store/store.db`** — adds the `bundles` table (one row per patient, `bundle_json` is the full FHIR JSON)
-- **`validation_report.json`** — per-patient pass/fail with `entries` count or error details
-
-Verify:
-
-```bash
-sqlite3 store/store.db "SELECT COUNT(*) FROM bundles"
-sqlite3 store/store.db "SELECT json_extract(bundle_json, '$.type') AS type, COUNT(*) FROM bundles GROUP BY type"
-```
-
-Verified on the full 655-patient cohort: 655/655 valid in ~32s, 56279 total FHIR resources persisted (avg 86/bundle for Synthea, 1 for MIMIC).
-
-## Generating AI Clinical Summaries (Task 3)
-
-Set up the Anthropic key and run the batch script:
-
-```bash
-cp .env.example .env             # then fill in ANTHROPIC_API_KEY=sk-ant-...
-python scripts/generate_summaries.py [--limit N]
-```
-
-For each FHIR Bundle in `store/store.db`, the script:
-
-1. Computes `cache_key = sha256(patient_id + bundle_json)`
-2. Hits cache → done (zero API spend on re-runs)
-3. Calls **Claude Haiku 4.5** with a strict system prompt (JSON-only, ≤200 words, never invent facts, always include AI disclaimer)
-4. Parses + validates the JSON into a `ClinicalSummary` model
-5. Word-count guard: if over 200, retry once with the same prompt
-6. Saves to the `summaries` table
-
-A `ClinicalSummary` has: `chief_concern`, `key_diagnoses[]`, `recent_media[]`, `anomalies[]`, `disclaimer`, `word_count`, `model`, `generated_at`.
-
-Inspect the cache:
-
-```bash
-sqlite3 store/store.db "SELECT COUNT(*) FROM summaries"
-sqlite3 store/store.db "SELECT chief_concern FROM summaries WHERE patient_id='<id>'"
-```
-
-## Semantic Search (Task 4)
-
-Once Tasks 1-3 have populated `store/store.db`, build the vector index and run the API server:
-
-```bash
-python scripts/build_index.py            # ~10s for 100-pt cohort, ~minutes for 555
-uvicorn backend.api.main:app --reload    # http://localhost:8000
-```
-
-Endpoints:
-
-| Method | Path | Purpose |
+| Variable | Default | Purpose |
 |---|---|---|
-| GET | `/health` | liveness probe |
-| GET | `/docs` | auto-generated OpenAPI / Swagger UI |
-| POST | `/search` | semantic search (Task 4) |
-| GET | `/patient/{id}` | patient detail (added in Task 5) |
+| `LLM_PROVIDER` | `ollama` | `ollama` \| `anthropic`. Picks summarization backend. |
+| `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama daemon URL. |
+| `OLLAMA_MODEL` | `llama3.2:3b` | Pulled Ollama model id. |
+| `ANTHROPIC_API_KEY` | _(unset)_ | Required when `LLM_PROVIDER=anthropic`. |
+| `ANTHROPIC_MODEL` | `claude-haiku-4-5` | Claude model id. |
+| `STORE_DIR` | `/app/store` (Docker) | Directory holding `store.db` + `chroma/`. |
+| `PORT` | `7860` (Docker) / `8000` (local) | uvicorn bind port. |
 
-`POST /search` request/response:
+A `.env.example` is included. Copy to `.env` and edit; `python-dotenv` picks it up automatically.
+
+---
+
+## 📡 API Reference
+
+Interactive docs at `/docs` (Swagger) and `/redoc` once the server is up.
+
+### `POST /search`
+
+```bash
+curl -X POST http://127.0.0.1:8000/search -H "Content-Type: application/json" -d '{
+  "query": "alzheimer cognitive decline",
+  "top_k": 5,
+  "resource_types": ["DocumentReference"],
+  "date_from": "2010-01-01",
+  "date_to":   "2020-12-31"
+}'
+```
+
+Returns top-N patient-deduped hits. Each hit:
 
 ```jsonc
-// request
 {
-  "query": "chest pain shortness of breath",
-  "resource_types": ["DocumentReference", "DiagnosticReport"],   // optional
-  "date_from": "2024-01-01",                                       // optional
-  "date_to": "2024-12-31",                                         // optional
-  "top_k": 5                                                       // default 5, max 20
-}
-
-// response
-{
-  "hits": [
-    {
-      "patient_id": "...",
-      "mrn": "MRN-...",
-      "display_name": "Ada Lovelace",
-      "resource_type": "DocumentReference",
-      "resource_date": "2024-08-12",
-      "relevance_score": 0.78,
-      "snippet": "Patient reports chest pain radiating to ..."
-    }
-  ],
-  "query_time_ms": 42
+  "patient_id":      "00744bef-...",
+  "mrn":             "MRN-10839608360387050",
+  "display_name":    "Jamison785 Denesik803",
+  "resource_type":   "DocumentReference",   // matched item's FHIR type
+  "resource_date":   "1998-06-28",
+  "relevance_score": 0.42,                  // 0–1, higher = closer
+  "snippet":         "1998-06-28 # Chief Complaint…",
+  "summary_snippet": "Patient is presenting with alzheimer's disease…",
+  "summary_source":  "ai"                   // ai | extractive | none
 }
 ```
 
-Quick curl test:
+Filter-only mode is supported: leave `query` empty when at least one of `resource_types` / `date_from` / `date_to` is set; results come back newest-first.
+
+### `GET /patient/{id}`
+
+Full FHIR view + AI summary + linked resources (notes, reports). Used by the modal.
+
+### `POST /patient/{id}/summarize[?force=true&provider=anthropic]`
+
+On-demand LLM summarization. Caches in SQLite by default; `?force=true` bypasses the cache. `?provider=` overrides `LLM_PROVIDER` per request.
+
+### `GET /providers`
+
+Lists configured LLM providers + their healthcheck status. Drives the frontend's provider selector.
+
+### `GET /health`
+
+Plain `{"status":"ok"}` for load balancer pings.
+
+---
+
+## 🧪 Testing
 
 ```bash
-curl -X POST http://localhost:8000/search \
-     -H "Content-Type: application/json" \
-     -d '{"query":"chest pain","top_k":5}' | jq .
+.venv/bin/pytest backend/tests/ -v       # 47 unit + integration tests
+.venv/bin/python scripts/verify.py       # 30 PDF-requirement checks against live server
+.venv/bin/python scripts/e2e_human.py    # Playwright/WebKit human-trajectory UI test
 ```
 
-Performance: ChromaDB HNSW lookup over the full index returns p95 < 100 ms on a warmed server. Cold start adds ~3 s the first request (model loading).
+The `verify.py` output is consumed by [`VERIFICATION_REPORT_v2.md`](VERIFICATION_REPORT_v2.md), which cites every PASS line with a reproduction command.
 
-## Frontend (Task 5)
+---
 
-After `uvicorn` is up (see Task 4), open `http://localhost:8000/` in a browser. The page is served from `frontend/index.html` via FastAPI's `StaticFiles` mount, so there is no separate dev server.
+## 🌐 Deployment
 
-Features:
+A **55-MB demo dataset** (`demo/store.db` + `demo/chroma/`) is baked into the Docker image by `scripts/prepare_demo_data.py`, so the image runs out of the box with zero external dependencies. The same image deploys to any platform that runs Docker on port 7860.
 
-- Search bar with 300 ms debounce → `POST /search`
-- Filter row: resource-type chips (multi-select with `aria-pressed`) + date range inputs
-- Result cards with patient name/MRN, resource date, type badge, summary snippet, and a relevance score meter
-- Patient detail modal (opens on card click or Enter/Space): full AI summary + linked FHIR resources list
-- Loading skeleton, empty state, error toast
-- Accessibility: ARIA labels, semantic landmarks, `aria-live` status announcements, focus trap inside modal, `Esc` to close
+### Hugging Face Spaces (recommended free tier — 5 minutes)
 
-Stack: vanilla JS (no build) + Tailwind via CDN. The entire frontend is two files (`index.html`, `app.js`) totaling ~17 KB.
+1. Sign in at <https://huggingface.co> and click **New Space** → SDK: **Docker** → CPU basic (free).
+2. Clone the empty Space repo locally:
+   ```bash
+   git clone https://huggingface.co/spaces/<your-username>/<space-name>
+   cd <space-name>
+   # Copy your project files in (or use the Space's `Files` UI to upload)
+   ```
+3. Make sure these are in the Space root:
+   - `Dockerfile`
+   - `backend/`, `frontend/`, `scripts/`, `requirements.txt`, `pyproject.toml`
+   - `demo/store.db` + `demo/chroma/` (built by `python scripts/prepare_demo_data.py --limit 25`)
+4. Add this YAML block at the top of the Space's `README.md` so HF picks the right SDK:
+   ```yaml
+   ---
+   title: EHR Media Intelligence
+   emoji: 🩺
+   colorFrom: blue
+   colorTo: indigo
+   sdk: docker
+   pinned: false
+   ---
+   ```
+5. (Optional) Under **Settings → Variables and secrets**, add:
+   - `ANTHROPIC_API_KEY` to enable Claude summaries (defaults to extractive fallback otherwise)
+   - `LLM_PROVIDER=anthropic`
+6. `git add . && git commit -m "deploy" && git push`.
+   HF builds the image (~6 min first time) and exposes the app at `https://<your-username>-<space-name>.hf.space`. Public URL, no credit card.
 
-## Running the tests
+### Render (Docker free tier)
+
+1. Push the repo to GitHub.
+2. Render dashboard → **New → Web Service** → connect repo → **Runtime: Docker**.
+3. Set env vars (`ANTHROPIC_API_KEY`, `LLM_PROVIDER`).
+4. Deploy. Free tier sleeps after 15 min idle; first request after sleep takes ~30 s to wake.
+
+### Fly.io (always-on, $5 free credit)
 
 ```bash
-pytest -v
+fly launch --image $(docker build -q .) --name ehr-media
+fly secrets set ANTHROPIC_API_KEY=sk-ant-... LLM_PROVIDER=anthropic
+fly deploy
 ```
 
-47 tests across ingestion (10), FHIR (16), summarize (8), search (13). All pass on Python 3.14, pydantic 2.13, fhir.resources 8.2, anthropic 0.102, sentence-transformers 5.5, chromadb 1.5, fastapi 0.136.
+### Self-host (any VPS with Docker)
+
+Same `docker run` line as Quick Start. Add a reverse proxy (Caddy / nginx) for TLS.
 
 ---
 
-## Project layout
+## 📁 Project Structure
 
 ```
-backend/
-├── ingestion/                    # Task 1 — raw → CanonicalPatient
-│   ├── models.py                 # AuditEntry, CanonicalPatient (Pydantic v2)
-│   ├── cleaner.py                # normalize_dob/gender/mrn, clean_record, deduplicate
-│   ├── parsers/
-│   │   ├── json_parser.py        # FHIR Bundle + NDJSON + JSON-array
-│   │   └── csv_parser.py         # CSV + .csv.gz
-│   └── pipeline.py               # parse → clean → dedup → audit → SQLite (CLI entry)
-├── fhir/                         # Task 2 — CanonicalPatient → FHIR Bundle
-│   ├── mappers/
-│   │   ├── patient.py
-│   │   ├── document_reference.py
-│   │   └── diagnostic_report.py
-│   ├── bundle.py                 # extract_documents/reports, build_bundle, validate_bundle
-│   └── store.py                  # SQLite `bundles` table
-├── summarize/                    # Task 3 — Bundle → ClinicalSummary
-│   ├── models.py                 # ClinicalSummary (Pydantic v2)
-│   ├── prompts.py                # SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
-│   ├── client.py                 # anthropic wrapper, retry, JSON extraction
-│   ├── cache.py                  # SQLite `summaries` table (keyed by bundle hash)
-│   └── quality.py                # word-count + disclaimer guards
-├── search/                       # Task 4 — vector index
-│   ├── embed.py                  # all-MiniLM-L6-v2 wrapper (384-dim, L2-norm)
-│   └── index.py                  # ChromaDB collection + query helpers
-├── api/                          # Task 4-5 — FastAPI app
-│   ├── main.py                   # app + /health + static frontend mount
-│   ├── models.py                 # SearchRequest/Hit/Response
-│   └── routes/
-│       ├── search.py             # POST /search (Task 4)
-│       └── patient.py            # GET /patient/{id} (Task 5)
-└── tests/
-    ├── test_models.py
-    ├── test_cleaner.py
-    ├── test_fhir_mappers.py
-    ├── test_fhir_bundle.py
-    ├── test_fhir_store.py
-    ├── test_summarize.py
-    ├── test_search.py
-    └── data/edge_cases.json
-
-scripts/
-├── download_data.sh              # idempotent dataset fetch
-├── build_bundles.py              # CanonicalPatient[] → FHIR Bundle[] → SQLite
-├── generate_summaries.py         # FHIR Bundle[] → Claude → ClinicalSummary[] → SQLite
-└── build_index.py                # Bundle + Summary text → embeddings → ChromaDB
-
-frontend/
-├── index.html                    # Tailwind CDN + filter row + search + results + modal
-└── app.js                        # state, debounced search, filters, modal w/ focus trap
-
-data/                             # gitignored, populated by the download script
-store/                            # gitignored, SQLite (store.db) + ChromaDB (chroma/)
+.
+├── backend/
+│   ├── ingestion/             # Task 1: parsers, cleaner, audit log
+│   ├── fhir/                  # Task 2: R4B mappers, bundle assembly, SQLite store
+│   ├── summarize/             # Task 3: LLM providers, prompts, cache, extractive fallback
+│   ├── search/                # Task 4: embedding + ChromaDB index
+│   ├── api/                   # FastAPI routes
+│   └── tests/                 # 47 pytest cases
+├── frontend/                  # Task 5: index.html + app.js (Vanilla JS, Tailwind CDN)
+├── scripts/
+│   ├── download_data.sh
+│   ├── build_bundles.py       # ingest → FHIR Bundles
+│   ├── generate_summaries.py  # batch LLM summarization
+│   ├── build_index.py         # populate ChromaDB
+│   ├── prepare_demo_data.py   # 25-patient demo subset
+│   ├── verify.py              # 30 PDF requirement checks
+│   ├── e2e_human.py           # Playwright UI test (real browser, real LLM call)
+│   └── docker_entrypoint.sh
+├── demo/                      # generated; ~55 MB, baked into Docker image
+├── store/                     # gitignored; ~1.4 GB full dataset
+├── data/                      # gitignored; Synthea + MIMIC raw
+├── Dockerfile
+├── .dockerignore
+├── requirements.txt
+├── pyproject.toml
+├── VERIFICATION_REPORT_v2.md  # strict PDF-requirement audit
+└── README.md
 ```
 
 ---
 
-## Design notes (Task 1)
+## 🗺 Roadmap & Known Limitations
 
-**Why Synthea + MIMIC-IV demo (not hand-crafted samples).** Real public datasets exercise the cleaner's edge cases naturally — varied date formats, deidentified blanks, format-specific identifier schemes. Synthea is FHIR-native so it feeds directly into Task 2; MIMIC's CSV-with-gzip path covers a real-world dirty case (deidentified fields → empty values → audit log captures the gaps). A hand-crafted `edge_cases.json` fixture is kept for unit tests to deterministically cover corners the real data doesn't hit (e.g. multiple date formats for the same person, unparseable dates).
-
-**Why `python-dateutil` for date parsing.** EHR exports mix `MM/DD/YYYY`, `YYYY-MM-DD`, `DD-Mon-YYYY`, and locale-specific variants. `dateutil.parser.parse` is the de-facto standard for tolerant parsing — handles all of these without a hand-rolled regex zoo. `normalize_dob` returns `(date | None, error_reason | None)` so the audit log can record _why_ parsing failed instead of swallowing the exception.
-
-**Audit log as a delta, not a redo log.** Cleaner functions append to `audit_log` only when they actually change a value. This means an empty audit log is meaningful (record was already canonical) and the log size correlates with how dirty a record was. The dedup pass uses this directly: when two records share a fingerprint, the one with the fewer audit entries wins because it carried more correct original data.
-
-**Field-alias table over per-source adapters.** Synthea (`FIRST`, `LAST`, `BIRTHDATE`, `GENDER`), MIMIC (`subject_id`, `gender`), and generic EHR (`dob`, `mrn`, `patient_id`) name fields differently. Instead of writing one cleaner per source, `cleaner.py` reads from each canonical key through a fallback chain. Adding a new source = adding aliases to one table.
-
-**SQLite as a hand-off interface.** Task 2 (FHIR mapping) consumes Task 1's output. Returning a Python list from `run_pipeline()` only works if the caller is in the same process. Persisting `CanonicalPatient` to SQLite means batch scripts in Task 2/3/4 can be re-run independently without re-ingesting. The table key is `record_id` (uuid4); the patient body is the full Pydantic JSON, so the schema doesn't have to track every Pydantic field individually.
-
-**FHIR Bundle structure for downstream Task 2.** Each Synthea patient's full Bundle (containing not just the `Patient` resource but also `Encounter`, `Observation`, `Condition`, etc.) is attached to `raw_record["_fhir_bundle"]`. When Task 2 builds its own normalized FHIR bundles, it pulls clinical content from there instead of re-fetching.
+- [ ] Pre-warm sentence-transformer at uvicorn startup (currently ~3 s cold latency on first `/search`)
+- [ ] Use Ollama's `keep_alive` to prevent model unload between summaries
+- [ ] Pre-build `demo/` in CI so cloners don't need to run `prepare_demo_data.py`
+- [ ] Wire up Anthropic key check into `/providers` healthcheck instead of relying on the per-request fallback
+- [ ] Optional: re-index ChromaDB after every batch summarize so the **Summary** match type populates without manual rebuild
 
 ---
 
-## Design notes (Task 2)
+## 🔒 Data & Privacy
 
-**Why `Bundle.type = "collection"`.** FHIR offers several bundle types (`document`, `message`, `transaction`, `batch`, `searchset`, `collection`). Our use case — a logical grouping of one patient's clinical artifacts for downstream search/summarization — matches `collection` exactly. We're not POSTing a transaction, not serving search results, and not exchanging messages.
-
-**`urn:uuid:` references throughout.** Bundle entries carry a `fullUrl` and resources inside reference each other. Two reference styles are common: external (`Patient/{id}` resolving against a base URL) and internal (`urn:uuid:{id}` resolving against another `fullUrl` in the same bundle). We use the internal form so each bundle is self-contained — Task 3 and Task 4 can hand a bundle to any FHIR-aware tool without needing to specify a base URL.
-
-**Lift Synthea's own DocumentReferences and DiagnosticReports, don't synthesize.** Synthea bundles already carry `DocumentReference` resources (free-text history-and-physical notes encoded as base64 attachments) and `DiagnosticReport` resources (lab summaries in `presentedForm`). `extract_documents` / `extract_reports` pull these out, decode the base64, and re-emit fresh resources via our mappers so all references retarget to our canonical `Patient.id`. This keeps clinical content authentic without copying any Synthea-specific identifiers forward.
-
-**Validation as a roundtrip, not a static check.** `fhir.resources` enforces field types at construction time, so a bundle that *can* be built is already valid against the FHIR R4 schema. `validate_bundle` adds a JSON serialize → deserialize round-trip which catches the rare cases where the in-memory model is fine but cannot be losslessly persisted. The result is captured per-patient in `validation_report.json` so any failures surface in the build run instead of silently being dropped.
-
-**Bundles as the source of truth for downstream tasks.** Once a bundle is in the `bundles` table, the upstream `canonical_patients` row is no longer needed for AI summarization or semantic search — the bundle contains everything a clinician would care about. This is why Task 3 and Task 4 will read from `bundles` directly rather than re-running ingestion or mapping.
+This project uses **only synthetic data** — Synthea (CC0) and the MIMIC-IV demo (deidentified under HIPAA Safe Harbor, freely redistributable). **No PHI is committed to the repo**, and the assessment PDF + any real datasets are explicitly `.gitignore`d.
 
 ---
 
-## Design notes (Task 3)
+## 🤝 Contributing
 
-**Why Claude Haiku 4.5.** Structured summarization with a strict schema is a constrained task — the model mostly needs to follow instructions and extract facts. Haiku is the cheapest tier with strong instruction-following, so the full 655-patient batch stays under a dollar. We can escalate to Sonnet 4.6 later by passing `--model claude-sonnet-4-6` to `generate_summaries.py`; nothing else changes.
+PRs welcome. Please:
 
-**Prompt-as-contract.** The system prompt embeds the entire output JSON schema and the constraints (≤200 words, never invent facts, mandatory disclaimer). The user prompt embeds the bundle JSON and the same schema for self-check. Combined with Pydantic's `model_validate` on parse, that's three independent layers of structure enforcement: prompt instructions, prompt schema, runtime validation.
-
-**Cache key = patient + bundle hash.** `sha256(patient_id + bundle_json)` means any change in the upstream bundle invalidates exactly the affected entries and nothing else. Re-running the pipeline is idempotent and cheap; running the entire 655-patient cohort costs ~$0 on re-run. The key also doesn't bake in the model name, so switching to Sonnet later means a single full re-summarization — which is what we'd want, since results would change.
-
-**Quality validation methodology.** Three programmatic guards run on every summary: (1) Pydantic schema validation ensures every required field is present and well-typed; (2) `validate_word_count` rejects summaries over 200 words across all free-text fields combined; (3) `has_disclaimer` rejects empty disclaimers. A manual spot-check methodology lives in the writeup: pick 5 random `(bundle, summary)` pairs, diff the summary against the bundle's `Condition` and `Observation` resources, look for hallucinated diagnoses or medications. The negative test (a bundle stripped of clinical content) confirms the model says "no clinical history on record" rather than inventing one.
-
-**Lazy + injectable client.** `client._get_client()` builds the Anthropic SDK client on first use, not on import, so tests and CI never need `ANTHROPIC_API_KEY` set. `client.set_client(mock)` lets the entire 8-test summarize suite run with a `MagicMock` — zero real API spend during development.
-
-**Trim bundles before sending.** Synthea bundles can be hundreds of KB (each patient has ~80 resources including every Observation). The client clips the serialized JSON at 50K chars before prompting. Truncation keeps the head of the bundle (Patient + early Encounters/Conditions) which is the most useful context for the chief-concern + diagnoses summary; trailing detail mostly duplicates earlier signal.
+1. `pip install -e .` + `pip install -r requirements.txt`
+2. Add tests for new code under `backend/tests/`
+3. Run `pytest`, `python scripts/verify.py`, and `python scripts/e2e_human.py` before pushing
+4. Use Conventional Commits (`feat(scope): …`, `fix(scope): …`, etc.)
 
 ---
 
-## Design notes (Task 4)
+## 📄 License
 
-**Why `all-MiniLM-L6-v2`.** 384-dim, ~80 MB, runs on CPU in tens of milliseconds — the right scale for a 100-1000 patient demo with no GPU budget. It's good at general semantic similarity (MI ≈ heart attack ≈ myocardial infarction) but not clinical-specialty trained; if quality issues surface, swapping in `pubmedbert` or a Hugging Face `sentence-transformers/all-mpnet-base-v2` is a one-line change because `embed.py` already centralizes the model name.
-
-**Why ChromaDB.** It's the lightest vector store that ships persistence out of the box. PersistentClient writes to a local directory, no server process, no schema migration, no extra dependencies. FAISS is faster at billion-vector scale but has no built-in persistence + metadata story; SQLite-vss requires a custom build of SQLite. For 500-1500 vectors per patient × 100s of patients, ChromaDB's HNSW returns top-5 in under 10 ms after the model is loaded.
-
-**Three indexed document types per patient.** `Summary` (one per patient, holds the LLM-distilled chief concern + diagnoses), `DocumentReference` (free-text notes from Synthea's bundles), `DiagnosticReport` (lab/imaging conclusions). The Summary is what a clinician would scan first; the other two surface verbatim source content for verification. Each is a separate row so they rank independently.
-
-**Unix-int timestamps for date filtering.** ChromaDB's `$gte` / `$lte` operators only accept numeric metadata — string comparisons of ISO dates do not work even though ISO dates sort lexicographically. We store two date fields per doc: `resource_date` (ISO string for display) and `resource_timestamp` (Unix int seconds for filtering). The API converts `date_from`/`date_to` to timestamps before building the where clause.
-
-**Cosine distance → relevance score in [0, 1].** ChromaDB returns cosine distance, where 0 = identical and 2 = opposite. We map `relevance_score = 1 - distance`, clamp to `[0, 1]`, and expose it on every `SearchHit`. Because embeddings are L2-normalized at the embedding layer, the cosine-distance space is mathematically equivalent to (1 - dot product), so the ranking matches what a manual cosine implementation would produce.
-
-**Idempotent index builds.** `scripts/build_index.py` uses composite ids like `<patient_id>::<resource_type>::<resource_id>` and consults `existing_ids()` before embedding. A re-run after adding 10 new patients embeds 10 patient's worth of docs (~800), not the full set. `--force` bypasses this for an end-to-end rebuild.
+MIT — see [`LICENSE`](LICENSE).
 
 ---
 
-## Design notes (Task 5)
+## 🙏 Acknowledgments
 
-**Vanilla JS + Tailwind CDN, not React.** The UI is one search input, one filter row, a list of cards, and a modal. The total state graph fits on the back of a napkin — there's no component tree deep enough to need React's reconciliation, no client-side routing, no global store. Adding a build step (Vite, Tailwind CLI, npm) would have cost ~20× the lines for zero functional gain. Tailwind via `<script src="https://cdn.tailwindcss.com">` is officially "not for production" but for a buildless demo it's the right tradeoff; the README documents how to swap to a vendored `tailwind.min.css` if the CDN is unreachable.
-
-**Same-origin static mount instead of CORS.** FastAPI mounts `frontend/` at `/` after the API routes are registered, so the frontend and backend share an origin. No `CORSMiddleware`, no cookies, no preflight requests, no proxy config — `fetch('/search')` and `fetch('/patient/{id}')` Just Work.
-
-**Race-condition guard on the search input.** Every keystroke increments `state.requestId` before issuing a `fetch`. When the promise resolves, the response is dropped if its captured id doesn't match the current one. Without this, an older slow request can overwrite the rendering of a newer fast request — visible during cold start when the first query takes ~3 s while later queries take ~100 ms.
-
-**Focus trap implemented by hand.** ~20 lines: enumerate focusable elements inside the modal, intercept `Tab` / `Shift+Tab`, wrap focus between the first and last. We restore focus to the originating card on close via `lastFocused`. This is cheap and matches what production a11y libraries do; pulling in `focus-trap` or `@radix-ui/dialog` would add a build step and ~30 KB.
-
-**Accessibility methodology.** Verified manually: tab through the search box → filter chips → cards → modal close button without escaping focus order. `Esc` closes the modal and returns focus to the card. Screen-reader announcements via the `aria-live="polite"` status element keep keyboard-only users informed of "Searching…", result counts, "Search failed", and "Showing detail for X". Visible focus rings via `:focus-visible`. A Lighthouse run on a result-laden page is the recommended automated check, with a target of ≥ 90.
-
-**Score visualization.** A horizontal bar (`role="meter"`, `aria-valuemin=0`, `aria-valuemax=1`, `aria-valuenow=<score>`) plus the numeric value. No chart library. The bar fills a Tailwind `bg-blue-500` to `score * 100%` width — scannable at a glance and announces correctly to screen readers.
-
----
-
-## License
-
-[MIT](LICENSE)
+- [Synthea](https://github.com/synthetichealth/synthea) — synthetic FHIR R4 patient data
+- [MIMIC-IV demo](https://physionet.org/content/mimic-iv-demo/2.2/) — deidentified ICU records
+- [`fhir.resources`](https://github.com/nazrulworld/fhir.resources) — Pydantic-native FHIR R4B schemas
+- [sentence-transformers](https://www.sbert.net/) — `all-MiniLM-L6-v2` 384-dim embeddings
+- [ChromaDB](https://www.trychroma.com/) — embedded vector store with HNSW + metadata filters
+- [Ollama](https://ollama.com/) — local LLM runtime
+- The clinical guidance baked into the prompts is informed by [HL7 FHIR R4 spec](https://hl7.org/fhir/R4/) and the [Onye AI assessment brief](https://onyeone.com/)
