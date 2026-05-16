@@ -1,0 +1,33 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+.github/
+node_modules/
+
+# Large raw datasets — image gets pre-trimmed `demo/` instead.
+data/
+store/
+audit_report.json
+validation_report.json
+
+# Local config & secrets.
+.env
+.env.local
+
+# Editor noise.
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local test artifacts.
+/tmp/
+*.log
+
+# Egg metadata.
+*.egg-info/
+build/
+dist/

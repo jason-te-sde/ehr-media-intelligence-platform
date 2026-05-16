@@ -22,8 +22,10 @@ venv/
 # fixture directories like backend/tests/data/ stay tracked.
 /data/
 /store/
+/demo/
 /audit_report.json
 /validation_report.json
+/docs/screenshots/
 
 # Proprietary assessment document — keep local only, do not publish
 NYCEDC - Onye*.pdf
