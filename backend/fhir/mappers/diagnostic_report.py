@@ -5,9 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 
-from fhir.resources.codeableconcept import CodeableConcept
-from fhir.resources.diagnosticreport import DiagnosticReport
-from fhir.resources.reference import Reference
+from fhir.resources.R4B.codeableconcept import CodeableConcept
+from fhir.resources.R4B.diagnosticreport import DiagnosticReport
+from fhir.resources.R4B.reference import Reference
 
 
 def to_diagnostic_report(
@@ -16,6 +16,7 @@ def to_diagnostic_report(
     category: str = "LAB",
     date: date | datetime | str | None = None,
     resource_id: str | None = None,
+    encounter_id: str | None = None,
 ) -> DiagnosticReport:
     """Build a valid FHIR R4 ``DiagnosticReport``.
 
@@ -35,7 +36,7 @@ def to_diagnostic_report(
     else:
         eff = date.isoformat()
 
-    return DiagnosticReport(
+    dr = DiagnosticReport(
         id=resource_id or str(uuid.uuid4()),
         status="final",
         subject=Reference(reference=f"urn:uuid:{patient_id}"),
@@ -47,3 +48,6 @@ def to_diagnostic_report(
         code=CodeableConcept(text="Clinical Note"),
         conclusion=conclusion,
     )
+    if encounter_id:
+        dr.encounter = Reference(reference=f"urn:uuid:{encounter_id}")
+    return dr

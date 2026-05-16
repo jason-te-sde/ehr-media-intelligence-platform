@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from fhir.resources.documentreference import DocumentReference
-from fhir.resources.patient import Patient
+from fhir.resources.R4B.documentreference import DocumentReference
+from fhir.resources.R4B.patient import Patient
 
 from backend.fhir.mappers.diagnostic_report import to_diagnostic_report
 from backend.fhir.mappers.document_reference import decode_attachment, to_document_reference

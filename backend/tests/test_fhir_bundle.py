@@ -6,9 +6,9 @@ import base64
 from datetime import date
 
 import pytest
-from fhir.resources.diagnosticreport import DiagnosticReport
-from fhir.resources.documentreference import DocumentReference
-from fhir.resources.patient import Patient
+from fhir.resources.R4B.diagnosticreport import DiagnosticReport
+from fhir.resources.R4B.documentreference import DocumentReference
+from fhir.resources.R4B.patient import Patient
 
 from backend.fhir.bundle import build_bundle, extract_documents, extract_reports, validate_bundle
 from backend.ingestion.models import CanonicalPatient

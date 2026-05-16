@@ -103,12 +103,13 @@ def parse_json(path: str | Path) -> list[dict[str, Any]]:
     if text.startswith("["):
         return parse_json_array_file(p)
     if text.startswith("{"):
-        # could be a single object (FHIR Bundle) or one of many NDJSON lines
-        first_line, _, rest = text.partition("\n")
-        if rest.strip():
+        # Try parsing the whole file as one JSON object first (handles
+        # pretty-printed FHIR Bundles whose object spans many lines).
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
             return parse_ndjson_file(p)
-        data = json.loads(first_line)
-        if data.get("resourceType") == "Bundle":
+        if isinstance(data, dict) and data.get("resourceType") == "Bundle":
             return parse_fhir_bundle_file(p)
-        return [data]
+        return [data] if isinstance(data, dict) else parse_ndjson_file(p)
     raise ValueError(f"{p}: unrecognized JSON content")

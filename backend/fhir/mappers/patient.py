@@ -7,11 +7,11 @@ is reused across the bundle so internal ``urn:uuid:{id}`` references resolve.
 
 from __future__ import annotations
 
-from fhir.resources.codeableconcept import CodeableConcept
-from fhir.resources.coding import Coding
-from fhir.resources.humanname import HumanName
-from fhir.resources.identifier import Identifier
-from fhir.resources.patient import Patient
+from fhir.resources.R4B.codeableconcept import CodeableConcept
+from fhir.resources.R4B.coding import Coding
+from fhir.resources.R4B.humanname import HumanName
+from fhir.resources.R4B.identifier import Identifier
+from fhir.resources.R4B.patient import Patient
 
 from backend.ingestion.models import CanonicalPatient
 

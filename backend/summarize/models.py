@@ -9,8 +9,11 @@ after generation.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+ConfidenceLevel = Literal["low", "medium", "high"]
 
 
 class ClinicalSummary(BaseModel):
@@ -32,11 +35,15 @@ class ClinicalSummary(BaseModel):
     disclaimer: str = Field(
         description="AI-generated, not a clinical decision — always non-empty.",
     )
+    confidence: ConfidenceLevel = Field(
+        default="medium",
+        description="Self-rated confidence (low|medium|high) — low when source data is sparse.",
+    )
     word_count: int = Field(
         ge=0,
         description="Total word count across all free-text fields; validated by quality.py.",
     )
     model: str = Field(
-        description="Anthropic model name used to generate this summary.",
+        description="LLM model name used to generate this summary.",
     )
     generated_at: datetime

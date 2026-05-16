@@ -20,10 +20,12 @@ def health() -> dict[str, str]:
 
 
 from backend.api.routes.patient import router as patient_router
+from backend.api.routes.providers import router as providers_router
 from backend.api.routes.search import router as search_router
 
 app.include_router(search_router)
 app.include_router(patient_router)
+app.include_router(providers_router)
 
 
 # Static frontend mount. The frontend/ directory is populated in Task 5;

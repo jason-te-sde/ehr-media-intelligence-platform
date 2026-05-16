@@ -16,7 +16,7 @@ from typing import Any
 
 import anthropic
 from anthropic import APIStatusError
-from fhir.resources.bundle import Bundle
+from fhir.resources.R4B.bundle import Bundle
 
 from .models import ClinicalSummary
 from .prompts import SYSTEM_PROMPT, render_user_prompt

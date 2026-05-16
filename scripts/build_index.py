@@ -23,9 +23,9 @@ import sys
 from datetime import datetime, timezone
 from time import perf_counter
 
-from fhir.resources.diagnosticreport import DiagnosticReport
-from fhir.resources.documentreference import DocumentReference
-from fhir.resources.patient import Patient
+from fhir.resources.R4B.diagnosticreport import DiagnosticReport
+from fhir.resources.R4B.documentreference import DocumentReference
+from fhir.resources.R4B.patient import Patient
 
 from backend.fhir.mappers.document_reference import decode_attachment
 from backend.fhir.mappers.patient import extract_mrn

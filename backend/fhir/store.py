@@ -12,8 +12,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from fhir.resources.bundle import Bundle
-from fhir.resources.patient import Patient
+from fhir.resources.R4B.bundle import Bundle
+from fhir.resources.R4B.patient import Patient
 
 DEFAULT_DB_PATH = "store/store.db"
 

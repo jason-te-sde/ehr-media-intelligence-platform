@@ -190,8 +190,21 @@ def test_search_date_range_excludes_older(client):
 
 
 def test_search_empty_query_rejected(client):
+    # Empty query with NO filters → 400 (route raises). Previously 422
+    # (Pydantic rejected it) before filter-only mode was added.
     r = client.post("/search", json={"query": ""})
-    assert r.status_code == 422
+    assert r.status_code == 400
+    assert "query" in r.json()["detail"].lower()
+
+
+def test_search_filter_only_mode_allowed(client):
+    # Empty query is allowed when at least one filter is supplied —
+    # returns matches sorted by date (newest first).
+    r = client.post("/search", json={
+        "query": "",
+        "resource_types": ["DocumentReference"],
+    })
+    assert r.status_code == 200
 
 
 def test_search_top_k_capped(client):

@@ -11,6 +11,8 @@
     .skeleton { animation: pulse-bg 1.5s ease-in-out infinite; }
     /* Focus ring stays visible on dark backdrops */
     :focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+    /* [hidden] must beat Tailwind utilities like .flex on the same element */
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body class="bg-slate-50 text-slate-900 min-h-screen flex flex-col">
@@ -19,19 +21,26 @@
   <div class="max-w-5xl mx-auto px-4 py-3 space-y-3">
     <div class="flex items-baseline justify-between gap-3 flex-wrap">
       <h1 class="text-xl font-semibold tracking-tight">EHR Media Intelligence</h1>
-      <p class="text-xs text-slate-500">Semantic search · Clinician triage view</p>
+      <div class="flex items-center gap-3 text-xs">
+        <label for="provider-select" class="text-slate-500">LLM:</label>
+        <select id="provider-select" aria-label="LLM provider"
+                class="min-h-8 px-2 py-1 border border-slate-300 rounded bg-white">
+          <option value="">Loading…</option>
+        </select>
+        <span id="provider-msg" class="text-slate-400 hidden sm:inline" aria-live="polite"></span>
+      </div>
     </div>
 
-    <!-- Filter row -->
+    <!-- Filter row — PDF Task 5: "resource type dropdown, date range picker" -->
     <div id="filters" role="region" aria-label="Search filters"
          class="flex flex-wrap items-center gap-2 text-sm">
-      <span class="text-slate-500 mr-1">Type:</span>
-      <button data-rtype="Summary" aria-pressed="false"
-              class="rtype min-h-9 px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-100 transition">Summary</button>
-      <button data-rtype="DocumentReference" aria-pressed="false"
-              class="rtype min-h-9 px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-100 transition">Note</button>
-      <button data-rtype="DiagnosticReport" aria-pressed="false"
-              class="rtype min-h-9 px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-100 transition">Report</button>
+      <label class="text-slate-500 mr-1" for="rtype-select">Type:</label>
+      <select id="rtype-select" aria-label="Filter by FHIR resource type"
+              class="min-h-9 px-2 py-1 border border-slate-300 rounded text-sm bg-white">
+        <option value="">All resource types</option>
+        <option value="DocumentReference">Note (DocumentReference)</option>
+        <option value="DiagnosticReport">Report (DiagnosticReport)</option>
+      </select>
 
       <span class="text-slate-500 ml-3 mr-1">Date:</span>
       <label class="sr-only" for="date-from">Date from</label>
@@ -99,6 +108,6 @@
   </div>
 </div>
 
-<script src="/app.js"></script>
+<script src="/app.js?v=9"></script>
 </body>
 </html>

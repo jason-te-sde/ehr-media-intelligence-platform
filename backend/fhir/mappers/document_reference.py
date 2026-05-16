@@ -6,10 +6,14 @@ import base64
 import uuid
 from datetime import date, datetime
 
-from fhir.resources.attachment import Attachment
-from fhir.resources.codeableconcept import CodeableConcept
-from fhir.resources.documentreference import DocumentReference, DocumentReferenceContent
-from fhir.resources.reference import Reference
+from fhir.resources.R4B.attachment import Attachment
+from fhir.resources.R4B.codeableconcept import CodeableConcept
+from fhir.resources.R4B.documentreference import (
+    DocumentReference,
+    DocumentReferenceContent,
+    DocumentReferenceContext,
+)
+from fhir.resources.R4B.reference import Reference
 
 
 def _as_iso_datetime(d: date | datetime | str | None) -> str | None:
@@ -33,13 +37,16 @@ def to_document_reference(
     doc_type: str = "Clinical Note",
     date: date | datetime | str | None = None,
     resource_id: str | None = None,
+    encounter_id: str | None = None,
 ) -> DocumentReference:
     """Build a valid FHIR R4 ``DocumentReference`` carrying ``text`` as the attachment.
 
     ``patient_id`` matches the bundle's ``Patient.id`` / ``fullUrl`` so the
     ``subject`` reference resolves internally via ``urn:uuid:{patient_id}``.
+    ``encounter_id``, when provided, populates ``context.encounter`` so this
+    note is linked to the originating clinical visit.
     """
-    return DocumentReference(
+    dr = DocumentReference(
         id=resource_id or str(uuid.uuid4()),
         status="current",
         subject=Reference(reference=f"urn:uuid:{patient_id}"),
@@ -52,6 +59,11 @@ def to_document_reference(
             ),
         )],
     )
+    if encounter_id:
+        dr.context = DocumentReferenceContext(
+            encounter=[Reference(reference=f"urn:uuid:{encounter_id}")],
+        )
+    return dr
 
 
 def decode_attachment(dr: DocumentReference) -> str:

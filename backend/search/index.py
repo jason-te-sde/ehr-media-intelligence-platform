@@ -83,6 +83,9 @@ def reset_collection(path: str | Path = DEFAULT_PATH) -> None:
         pass
 
 
+UPSERT_BATCH_SIZE = 5000   # ChromaDB hard cap is 5461; leave headroom.
+
+
 def add_documents(docs: list[IndexedDoc], path: str | Path = DEFAULT_PATH) -> int:
     """Upsert (id, embedding, metadata, snippet) for each doc. Returns count."""
     if not docs:
@@ -94,12 +97,14 @@ def add_documents(docs: list[IndexedDoc], path: str | Path = DEFAULT_PATH) -> in
         vecs = embed_batch([d.text for d in missing])
         for d, v in zip(missing, vecs, strict=True):
             d.embedding = v
-    coll.upsert(
-        ids=[d.id for d in docs],
-        embeddings=[d.embedding for d in docs],
-        metadatas=[d.metadata for d in docs],
-        documents=[d.snippet for d in docs],
-    )
+    for i in range(0, len(docs), UPSERT_BATCH_SIZE):
+        chunk = docs[i : i + UPSERT_BATCH_SIZE]
+        coll.upsert(
+            ids=[d.id for d in chunk],
+            embeddings=[d.embedding for d in chunk],
+            metadatas=[d.metadata for d in chunk],
+            documents=[d.snippet for d in chunk],
+        )
     return len(docs)
 
 
@@ -131,3 +136,28 @@ def query(
         QueryHit(id=i, distance=d, metadata=m, document=doc)
         for i, d, m, doc in zip(ids, distances, metadatas, documents, strict=True)
     ]
+
+
+def list_by_filter(
+    where: dict[str, Any],
+    top_k: int = 5,
+    path: str | Path = DEFAULT_PATH,
+) -> list[QueryHit]:
+    """Return matching docs sorted newest-first by ``resource_timestamp``.
+
+    Used when the user supplies only filters and no free-text query — there's
+    no embedding to rank against, so we fall back to recency. ChromaDB has no
+    server-side ORDER BY, so we over-fetch and sort in Python.
+    """
+    coll = get_or_create_collection(path)
+    # Cap the over-fetch so we don't drag huge result sets into memory.
+    raw = coll.get(where=where, limit=top_k * 20, include=["metadatas", "documents"])
+    ids = raw.get("ids") or []
+    metadatas = raw.get("metadatas") or []
+    documents = raw.get("documents") or []
+    rows = [
+        QueryHit(id=i, distance=0.0, metadata=m, document=d)
+        for i, m, d in zip(ids, metadatas, documents, strict=True)
+    ]
+    rows.sort(key=lambda h: h.metadata.get("resource_timestamp") or 0, reverse=True)
+    return rows[:top_k]
