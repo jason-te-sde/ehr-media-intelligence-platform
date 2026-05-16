@@ -29,3 +29,6 @@ venv/
 
 # Proprietary assessment document — keep local only, do not publish
 NYCEDC - Onye*.pdf
+
+# Verification reports (regenerable via scripts/verify.py; not part of deliverable)
+VERIFICATION_REPORT*.md
